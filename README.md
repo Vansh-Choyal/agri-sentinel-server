@@ -39,7 +39,7 @@ Select a field partition, open a rover, issue an Inspect command, view its ackno
 
 ## ESP32 camera
 
-Open **Rover fleet → ESP32 Camera** to see the latest camera images, live/offline status and an expandable view. The camera captures 320 x 240 RGB565 and encodes JPEG at quality 88 with 4:4:4 chroma before uploading over persistent HTTP or certificate-verified HTTPS. This avoids transferring 153,600 raw bytes per frame across the internet. The 10 fps target is not a measured guarantee; the viewer and Serial Monitor show actual rates. Camera traffic remains independent of sensor telemetry. The generated sketch and flashing instructions are in [docs/ESP32_CAMERA_SETUP.md](docs/ESP32_CAMERA_SETUP.md). Wi-Fi credentials and the configured sketch stay under ignored `instance/`.
+Open **Rover fleet → ESP32 Camera** to see the latest camera images, live/offline status and an expandable view. The camera captures 320 x 240 RGB565 and encodes JPEG at quality 88 with 4:4:4 chroma before uploading over persistent HTTP or certificate-verified HTTPS. This avoids transferring 153,600 raw bytes per frame across the internet. With PSRAM, encoding overlaps uploads using bounded latest-frame buffers; stale waiting frames are replaced rather than queued. The 10 fps target is not a measured guarantee; the viewer and Serial Monitor show actual rates. Camera traffic remains independent of sensor telemetry. The generated sketch and flashing instructions are in [docs/ESP32_CAMERA_SETUP.md](docs/ESP32_CAMERA_SETUP.md). Wi-Fi credentials and the configured sketch stay under ignored `instance/`.
 
 ## Architecture
 

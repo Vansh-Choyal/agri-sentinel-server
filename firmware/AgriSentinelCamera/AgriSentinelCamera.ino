@@ -9,6 +9,9 @@
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include <time.h>
+#include <atomic>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 const char *WIFI_SSID = @WIFI_SSID@;
 const char *WIFI_PASSWORD = @WIFI_PASSWORD@;
@@ -29,23 +32,84 @@ WiFiClientSecure secureConnection;
 HTTPClient http;
 bool httpReady = false;
 uint32_t fpsWindowStart = 0, uploadedFrames = 0, frameWorkMs = 0;
-uint8_t *packet = nullptr;
-size_t packetCapacity = 0;
-size_t jpegBytes = 0;
-bool jpegOverflow = false;
-bool discardQueuedFrame = false;
+// One packet can upload while another is encoded and one latest packet waits.
+// Only slot ownership changes are locked; no capture, encoding or I/O under a lock.
+struct JpegPacket {
+  uint8_t *data = nullptr;
+  size_t capacity = 0, size = 0;
+  bool overflow = false;
+  uint16_t width = 0, height = 0;
+  uint32_t startedAt = 0, captureMs = 0, encodeMs = 0;
+};
+JpegPacket packets[3];
+// Producer-owned scratch lets the single camera buffer refill during encoding.
+uint8_t *captureCopy = nullptr;
+size_t captureCapacity = 0;
+enum SlotState { SLOT_FREE, SLOT_ENCODING, SLOT_READY, SLOT_SENDING };
+SlotState slots[3] = {SLOT_FREE, SLOT_FREE, SLOT_FREE};
+portMUX_TYPE packetMux = portMUX_INITIALIZER_UNLOCKED;
+TaskHandle_t senderTask = nullptr;
+int pendingPacket = -1;
+uint32_t replacedFrames = 0;
+std::atomic<bool> discardQueuedFrame{false};
 uint32_t captureTotalMs = 0, packTotalMs = 0, sendTotalMs = 0;
 
+int acquireEncodingSlot() {
+  int result = -1;
+  portENTER_CRITICAL(&packetMux);
+  for (int i = 0; i < 3; ++i) {
+    if (slots[i] == SLOT_FREE) { slots[i] = SLOT_ENCODING; result = i; break; }
+  }
+  portEXIT_CRITICAL(&packetMux);
+  return result;
+}
+
+void releasePacket(int index) {
+  portENTER_CRITICAL(&packetMux);
+  slots[index] = SLOT_FREE;
+  portEXIT_CRITICAL(&packetMux);
+}
+
+void publishPacket(int index) {
+  portENTER_CRITICAL(&packetMux);
+  if (pendingPacket >= 0) {
+    slots[pendingPacket] = SLOT_FREE;
+    ++replacedFrames;
+  }
+  slots[index] = SLOT_READY;
+  pendingPacket = index;
+  portEXIT_CRITICAL(&packetMux);
+  if (senderTask) xTaskNotifyGive(senderTask);
+}
+
+int takeLatestPacket() {
+  portENTER_CRITICAL(&packetMux);
+  int index = pendingPacket;
+  if (index >= 0) {
+    pendingPacket = -1;
+    slots[index] = SLOT_SENDING;
+  }
+  portEXIT_CRITICAL(&packetMux);
+  return index;
+}
+
+void clearPendingPacket() {
+  portENTER_CRITICAL(&packetMux);
+  if (pendingPacket >= 0) { slots[pendingPacket] = SLOT_FREE; pendingPacket = -1; }
+  portEXIT_CRITICAL(&packetMux);
+}
+
 // The encoder callback does not propagate short writes. Track overflow ourselves
-// and never send a truncated JPEG. Reuse this bounded allocation across frames.
-size_t writeJpeg(void *, size_t index, const void *data, size_t length) {
+// and never send a truncated JPEG. Each encoder invocation owns its packet.
+size_t writeJpeg(void *arg, size_t index, const void *data, size_t length) {
+  JpegPacket &packet = *static_cast<JpegPacket *>(arg);
   if (!length) return 0;
-  if (jpegOverflow || index != jpegBytes || index > packetCapacity || length > packetCapacity - index) {
-    jpegOverflow = true;
+  if (packet.overflow || index != packet.size || index > packet.capacity || length > packet.capacity - index) {
+    packet.overflow = true;
     return 0;
   }
-  memcpy(packet + index, data, length);
-  jpegBytes += length;
+  memcpy(packet.data + index, data, length);
+  packet.size += length;
   return length;
 }
 
@@ -110,21 +174,19 @@ bool initializeCamera() {
   return true;
 }
 
-void uploadFrame() {
-  // Certificate validity checks need a synchronized clock before HTTPS.
-  if (String(SERVER_URL).startsWith("https://") && time(nullptr) < 1700000000) {
-    delay(250);
-    return;
-  }
-  const uint32_t frameStarted = millis();
+void encodeFrame() {
+  if (String(SERVER_URL).startsWith("https://") && time(nullptr) < 1700000000) return;
+  const int index = acquireEncodingSlot();
+  if (index < 0) return;
+  JpegPacket &packet = packets[index];
+  const uint32_t startedAt = millis();
   camera_fb_t *frame = esp_camera_fb_get();
-  if (frame && discardQueuedFrame) {
-    // Discard a frame that may have sat waiting during a failed network upload.
+  if (frame && discardQueuedFrame.exchange(false)) {
     esp_camera_fb_return(frame);
     frame = esp_camera_fb_get();
-    discardQueuedFrame = false;
   }
   if (!frame) {
+    releasePacket(index);
     Serial.println("Capture failed.");
     if (++captureFailures >= 3) {
       esp_camera_deinit();
@@ -135,40 +197,84 @@ void uploadFrame() {
   }
   captureFailures = 0;
   const uint32_t capturedAt = millis();
-  const uint16_t width = frame->width, height = frame->height;
-  const size_t pixels = (size_t)width * height;
-  const size_t rawBytes = pixels * 2;
+  const size_t rawBytes = (size_t)frame->width * frame->height * 2;
   if (frame->format != PIXFORMAT_RGB565 || frame->len < rawBytes) {
     esp_camera_fb_return(frame);
+    releasePacket(index);
     Serial.println("Incomplete RGB565 frame. Retrying...");
     return;
   }
   const size_t capacity = rawBytes + 4096;
-  if (packetCapacity < capacity) {
+  if (packet.capacity < capacity) {
     const uint32_t caps = MALLOC_CAP_8BIT | (capacity > 65536 && psramFound() ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL);
-    uint8_t *allocated = (uint8_t *)heap_caps_realloc(packet, capacity, caps);
+    uint8_t *allocated = (uint8_t *)heap_caps_realloc(packet.data, capacity, caps);
     if (!allocated) {
       esp_camera_fb_return(frame);
-      Serial.println("Packet allocation failed. Enable PSRAM for 320x240 or select QQVGA.");
+      releasePacket(index);
+      Serial.println("JPEG packet allocation failed. Frame dropped.");
       delay(100);
       return;
     }
-    packet = allocated;
-    packetCapacity = capacity;
+    packet.data = allocated;
+    packet.capacity = capacity;
   }
-  jpegBytes = 0;
-  jpegOverflow = false;
-  const bool encoded = frame2jpg_cb(frame, UPLOAD_JPEG_QUALITY, writeJpeg, nullptr);
-  // Capture may proceed while the independent compressed packet is uploaded.
-  esp_camera_fb_return(frame);
-  if (!encoded || jpegOverflow || jpegBytes < 4 || packet[0] != 0xff || packet[1] != 0xd8 ||
-      packet[jpegBytes - 2] != 0xff || packet[jpegBytes - 1] != 0xd9) {
+  packet.width = frame->width;
+  packet.height = frame->height;
+  packet.startedAt = startedAt;
+  packet.captureMs = capturedAt - startedAt;
+  packet.size = 0;
+  packet.overflow = false;
+  bool encoded;
+  if (senderTask) {
+    if (captureCapacity < rawBytes) {
+      uint8_t *allocated = (uint8_t *)heap_caps_realloc(captureCopy, rawBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      if (!allocated) {
+        esp_camera_fb_return(frame);
+        releasePacket(index);
+        Serial.println("Capture scratch allocation failed. Frame dropped.");
+        delay(100);
+        return;
+      }
+      captureCopy = allocated;
+      captureCapacity = rawBytes;
+    }
+    memcpy(captureCopy, frame->buf, rawBytes);
+    // Return BEFORE JPEG encoding: the driver can now refill while the encoder
+    // reads the independent copy. Keep one raw driver buffer for GC2145 safety.
+    esp_camera_fb_return(frame);
+    encoded = fmt2jpg_cb(captureCopy, rawBytes, packet.width, packet.height,
+                        PIXFORMAT_RGB565, UPLOAD_JPEG_QUALITY, writeJpeg, &packet);
+  } else {
+    encoded = frame2jpg_cb(frame, UPLOAD_JPEG_QUALITY, writeJpeg, &packet);
+    esp_camera_fb_return(frame);
+  }
+  packet.encodeMs = millis() - capturedAt;
+  if (!encoded || packet.overflow || packet.size < 4 || packet.data[0] != 0xff || packet.data[1] != 0xd8 ||
+      packet.data[packet.size - 2] != 0xff || packet.data[packet.size - 1] != 0xd9) {
+    releasePacket(index);
     Serial.println("JPEG encoding failed or exceeded the bounded packet. Frame dropped.");
     delay(25);
     return;
   }
-  const size_t packetBytes = jpegBytes;
-  const uint32_t packedAt = millis();
+  publishPacket(index);
+}
+
+// Only the sender owns the HTTP/TLS clients, including resets and disconnects.
+void sendLatestPacket() {
+  if (WiFi.status() != WL_CONNECTED) {
+    if (httpReady) closeTransport();
+    clearPendingPacket();
+    discardQueuedFrame.store(true);
+    return;
+  }
+  // Certificate validity checks need a synchronized clock before HTTPS.
+  if (String(SERVER_URL).startsWith("https://") && time(nullptr) < 1700000000) return;
+  const int index = takeLatestPacket();
+  if (index < 0) return;
+  JpegPacket &packet = packets[index];
+  // Do not replay a queued image after a network stall/reconnect.
+  if (millis() - packet.startedAt > 1000) { releasePacket(index); return; }
+  const uint32_t networkStarted = millis();
   if (!httpReady) {
     String endpoint = String(SERVER_URL) + "/api/v1/robots/" + ROBOT_ID + "/camera/frame";
     http.setConnectTimeout(10000);
@@ -182,46 +288,58 @@ void uploadFrame() {
       requestStarted = http.begin(connection, endpoint);
     }
     if (!requestStarted) {
+      releasePacket(index);
       Serial.println("Could not start HTTP request. Check SERVER_URL and TLS certificate bundle.");
+      delay(100);
       return;
     }
     httpReady = true;
   }
   http.addHeader("Content-Type", "image/jpeg");
-  http.addHeader("X-Camera-Width", String(width));
-  http.addHeader("X-Camera-Height", String(height));
+  http.addHeader("X-Camera-Width", String(packet.width));
+  http.addHeader("X-Camera-Height", String(packet.height));
   http.addHeader("Authorization", String("Bearer ") + DEVICE_KEY);
-  int status = http.POST(packet, packetBytes);
-  // Consume every response body so the next request can safely reuse HTTP/1.1.
+  int status = http.POST(packet.data, packet.size);
+  // Consume every response body before reusing HTTP/1.1.
   String responseBody = status > 0 ? http.getString() : String();
   if (status == 200) {
     uploadedFrames++;
-    frameWorkMs += millis() - frameStarted;
-    captureTotalMs += capturedAt - frameStarted;
-    packTotalMs += packedAt - capturedAt;
-    sendTotalMs += millis() - packedAt;
+    frameWorkMs += millis() - packet.startedAt;
+    captureTotalMs += packet.captureMs;
+    packTotalMs += packet.encodeMs;
+    sendTotalMs += millis() - networkStarted;
     const uint32_t elapsed = millis() - fpsWindowStart;
     if (elapsed >= 1000) {
-      Serial.printf("Frame %ux%u, JPEG %u bytes -> HTTP 200; %.1f fps / target %u; capture %u ms, encode %u ms, network %u ms, total %u ms\n",
-          width, height, (unsigned)packetBytes, uploadedFrames * 1000.0f / elapsed, (unsigned)TARGET_FPS,
+      portENTER_CRITICAL(&packetMux);
+      const uint32_t replaced = replacedFrames;
+      replacedFrames = 0;
+      portEXIT_CRITICAL(&packetMux);
+      Serial.printf("Frame %ux%u, JPEG %u bytes -> HTTP 200; %.1f fps / target %u; capture %u ms, encode %u ms, network %u ms, age %u ms; replaced %u; heap %u bytes\n",
+          packet.width, packet.height, (unsigned)packet.size, uploadedFrames * 1000.0f / elapsed, (unsigned)TARGET_FPS,
           (unsigned)(captureTotalMs / uploadedFrames), (unsigned)(packTotalMs / uploadedFrames),
-          (unsigned)(sendTotalMs / uploadedFrames), (unsigned)(frameWorkMs / uploadedFrames));
+          (unsigned)(sendTotalMs / uploadedFrames), (unsigned)(frameWorkMs / uploadedFrames),
+          (unsigned)replaced, ESP.getFreeHeap());
       uploadedFrames = frameWorkMs = 0;
       captureTotalMs = packTotalMs = sendTotalMs = 0;
       fpsWindowStart = millis();
     }
-  }
-  if (status > 0 && status != 200) {
-    Serial.printf("HTTP %d\n", status);
-    Serial.println(responseBody);
-  } else if (status <= 0) {
-    Serial.println(HTTPClient::errorToString(status));
-    Serial.println("Check server IP, server running, Windows Firewall, and Wi-Fi client isolation.");
-  }
-  if (status != 200) {
+  } else {
+    if (status > 0) { Serial.printf("HTTP %d\n", status); Serial.println(responseBody); }
+    else Serial.println(HTTPClient::errorToString(status));
     closeTransport();
-    discardQueuedFrame = true;
-    delay(100);
+    clearPendingPacket();
+    discardQueuedFrame.store(true);
+  }
+  releasePacket(index);
+  if (status != 200) delay(100);
+}
+
+void uploadTask(void *) {
+  for (;;) {
+    sendLatestPacket();
+    // Notifications wake this task as soon as a fresh JPEG is published. Yield
+    // even during startup/offline periods so Wi-Fi and system tasks can run.
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
   }
 }
 
@@ -242,13 +360,19 @@ void setup() {
   cameraReady = initializeCamera();
   lastCameraAttempt = millis();
   fpsWindowStart = millis();
+  if (psramFound() && xTaskCreatePinnedToCore(uploadTask, "camera-upload", 8192, nullptr, 1, &senderTask, 0) == pdPASS) {
+    Serial.println("JPEG pipeline enabled: encoder core 1, uploader core 0; one latest waiting frame.");
+  } else {
+    senderTask = nullptr;
+    Serial.println("Using sequential JPEG uploads (PSRAM/task unavailable).");
+  }
 }
 
 void loop() {
   static bool wifiReported = false;
   const uint32_t now = millis();
   if (WiFi.status() != WL_CONNECTED) {
-    if (httpReady) closeTransport();
+    if (!senderTask) sendLatestPacket();
     if (wifiReported) Serial.println("Wi-Fi disconnected. Reconnecting...");
     wifiReported = false;
     if (now - lastWifiAttempt >= 15000) {
@@ -280,7 +404,8 @@ void loop() {
   }
   if (now - lastFrameAt >= FRAME_INTERVAL_MS) {
     lastFrameAt = now;
-    uploadFrame();
+    encodeFrame();
+    if (!senderTask) sendLatestPacket();
   }
   // Never queue catch-up frames when capture/upload is slower than the target.
   delay(1);
