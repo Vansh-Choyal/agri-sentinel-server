@@ -1,0 +1,20 @@
+{
+  "api_url": "http://127.0.0.1:5000",
+  "interval_seconds": 10,
+  "timeout_seconds": 5,
+  "seed": 42,
+  "anomaly_frequency": 0.08,
+  "obstacle_frequency": 0.06,
+  "network_failure_rate": 0,
+  "sensor_ranges": {
+    "temperature_c": [18, 42],
+    "humidity_pct": [35, 96],
+    "soil_moisture_pct": [10, 65],
+    "mq2_raw": [0, 4095],
+    "mq3_raw": [0, 4095],
+    "obstacle_distance_cm": [5, 300]
+  },
+  "rovers": [
+    {"robot_id": "rv-001", "zone_id": "zone-a", "api_key": "REPLACE_WITH_THIS_ROVERS_PROVISIONED_KEY"}
+  ]
+}

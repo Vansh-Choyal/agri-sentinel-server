@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "event_id": "rv-001-000042",
+  "robot_id": "rv-001",
+  "zone_id": "zone-a",
+  "recorded_at": "2026-11-04T06:30:00Z",
+  "uptime_ms": 360000,
+  "telemetry": {
+    "temperature_c": 29.5,
+    "humidity_pct": 64.2,
+    "soil_moisture_pct": 38.0,
+    "mq2_raw": 210,
+    "mq3_raw": 175,
+    "heading_deg": 87.5,
+    "tilt_deg": 2.1,
+    "sound_level_raw": 110,
+    "obstacle_distance_cm": 42.0
+  },
+  "robot": {
+    "status": "patrolling",
+    "battery_pct": null,
+    "checkpoint_id": "cp-03"
+  }
+}

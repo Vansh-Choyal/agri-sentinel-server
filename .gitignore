@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.env
+instance/
+*.db
+*.db-shm
+*.db-wal
+coverage.xml
+.coverage
+node_modules/

@@ -1,0 +1,12 @@
+{
+  "name": "agrisentinel-ui-checks",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:ui": "node scripts/check_frontend.mjs"
+  },
+  "description": "Optional DOM integration checks against the running Flask backend; no Node runtime needed by the app.",
+  "devDependencies": {
+    "jsdom": "^30.1.3"
+  }
+}

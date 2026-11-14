@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign in · AgriSentinel</title><link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml"><link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}"></head>
+<body class="login-body">
+  <main class="login-shell">
+    <a class="brand login-brand" href="/"><img class="brand-logo" src="{{ url_for('static', filename='images/agri_sentinel_logo.jpeg') }}" alt="AgriSentinel" width="192" height="128"></a>
+    
+    <section class="login-form"><h1>Sign in to AgriSentinel</h1><p class="muted">Sign in to monitor your fields and manage your rovers.</p>
+      <form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}<button type="submit" class="button primary">Enter dashboard <span>↗</span></button></form>
+      <p class="login-help">Local credentials are in <code>instance/admin-credentials.txt</code>, or use the credentials configured in your environment.</p>
+    </section>
+  </main>
+</body></html>
