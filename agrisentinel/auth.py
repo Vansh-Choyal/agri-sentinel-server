@@ -29,8 +29,9 @@ def init_admin(app):
         else:
             password = secrets.token_urlsafe(18)
             credential_file.write_text(f"Username: {app.config['ADMIN_USERNAME']}\nPassword: {password}\n", encoding="utf-8")
-    if len(password) < 12:
-        raise ValueError("ADMIN_PASSWORD must have at least 12 characters")
+    minimum_length = max(8, app.config.get("ADMIN_PASSWORD_MIN_LENGTH", 12))
+    if len(password) < minimum_length:
+        raise ValueError(f"ADMIN_PASSWORD must have at least {minimum_length} characters")
     app.config["ADMIN_PASSWORD_HASH"] = generate_password_hash(password)
     app.config["ADMIN_PASSWORD"] = None
 

@@ -31,6 +31,7 @@ def create_app(config=None):
         MONITOR_INTERVAL_SECONDS=int(os.getenv("MONITOR_INTERVAL_SECONDS", "5")),
         ADMIN_USERNAME=os.getenv("ADMIN_USERNAME", "operator"),
         ADMIN_PASSWORD=os.getenv("ADMIN_PASSWORD") or None,
+        ADMIN_PASSWORD_MIN_LENGTH=max(8, int(os.getenv("ADMIN_PASSWORD_MIN_LENGTH", "12"))),
         SEED_DATA=True,
         SIM_ROVER_COUNT=int(os.getenv("SIM_ROVER_COUNT", "4")),
         MAX_SSE_CLIENTS=12,
