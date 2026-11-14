@@ -1,11 +1,14 @@
 // Complete sketch for the classic AI Thinker ESP32-CAM pinout.
 // Run scripts/setup_camera.py to create a configured copy under instance/.
-// Quality-balanced mode: 320x240 full RGB565; the SERVER encodes JPEG at quality 88.
+// Capture RGB565, encode JPEG once on-device, then upload over persistent HTTPS.
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include "esp_camera.h"
+#include "img_converters.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include <time.h>
 
 const char *WIFI_SSID = @WIFI_SSID@;
 const char *WIFI_PASSWORD = @WIFI_PASSWORD@;
@@ -14,6 +17,7 @@ const char *ROBOT_ID = @ROBOT_ID@;
 const char *DEVICE_KEY = @DEVICE_KEY@;
 const uint32_t TARGET_FPS = 10;
 const uint32_t FRAME_INTERVAL_MS = 1000 / TARGET_FPS;
+const uint8_t UPLOAD_JPEG_QUALITY = 88;
 // Preserve full sensor color and restore four times the pixels of speed mode.
 const framesize_t CAMERA_FRAME_SIZE = FRAMESIZE_QVGA;
 
@@ -21,19 +25,36 @@ bool cameraReady = false;
 uint32_t lastCameraAttempt = 0, lastWifiAttempt = 0, lastFrameAt = 0;
 uint8_t captureFailures = 0;
 WiFiClient connection;
+WiFiClientSecure secureConnection;
 HTTPClient http;
 bool httpReady = false;
 uint32_t fpsWindowStart = 0, uploadedFrames = 0, frameWorkMs = 0;
 uint8_t *packet = nullptr;
 size_t packetCapacity = 0;
+size_t jpegBytes = 0;
+bool jpegOverflow = false;
 bool discardQueuedFrame = false;
 uint32_t captureTotalMs = 0, packTotalMs = 0, sendTotalMs = 0;
+
+// The encoder callback does not propagate short writes. Track overflow ourselves
+// and never send a truncated JPEG. Reuse this bounded allocation across frames.
+size_t writeJpeg(void *, size_t index, const void *data, size_t length) {
+  if (!length) return 0;
+  if (jpegOverflow || index != jpegBytes || index > packetCapacity || length > packetCapacity - index) {
+    jpegOverflow = true;
+    return 0;
+  }
+  memcpy(packet + index, data, length);
+  jpegBytes += length;
+  return length;
+}
 
 void closeTransport() {
   // Force-close only on errors/disconnection; successful requests reuse the socket.
   http.setReuse(false);
   http.end();
   connection.stop();
+  secureConnection.stop();
   httpReady = false;
 }
 
@@ -68,6 +89,9 @@ bool initializeCamera() {
   config.fb_count = 1;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.jpeg_quality = 15;
+  // Match the server's existing quality mode; do not reduce colored-edge detail.
+  jpgSetChroma(CHROMA_444);
+  jpgSetRgb565BE(true);
   esp_err_t error = esp_camera_init(&config);
   if (error != ESP_OK) {
     Serial.printf("Camera init failed: 0x%x (%s). Retrying in 10s.\n", error, esp_err_to_name(error));
@@ -80,13 +104,18 @@ bool initializeCamera() {
     return false;
   }
   camera_sensor_info_t *info = esp_camera_sensor_get_info(&sensor->id);
-  Serial.printf("Camera: %s, PID 0x%04x; full RGB565, server JPEG quality 88; frame size %d; target %u fps\n",
+  Serial.printf("Camera: %s, PID 0x%04x; RGB565 -> device JPEG quality 88, 4:4:4; frame size %d; target %u fps\n",
       info ? info->name : "unknown", sensor->id.PID, (int)config.frame_size, (unsigned)TARGET_FPS);
   captureFailures = 0;
   return true;
 }
 
 void uploadFrame() {
+  // Certificate validity checks need a synchronized clock before HTTPS.
+  if (String(SERVER_URL).startsWith("https://") && time(nullptr) < 1700000000) {
+    delay(250);
+    return;
+  }
   const uint32_t frameStarted = millis();
   camera_fb_t *frame = esp_camera_fb_get();
   if (frame && discardQueuedFrame) {
@@ -108,17 +137,16 @@ void uploadFrame() {
   const uint32_t capturedAt = millis();
   const uint16_t width = frame->width, height = frame->height;
   const size_t pixels = (size_t)width * height;
-  const size_t packetBytes = pixels * 2;
-  if (frame->format != PIXFORMAT_RGB565 || frame->len < packetBytes) {
+  const size_t rawBytes = pixels * 2;
+  if (frame->format != PIXFORMAT_RGB565 || frame->len < rawBytes) {
     esp_camera_fb_return(frame);
     Serial.println("Incomplete RGB565 frame. Retrying...");
     return;
   }
-  if (packetCapacity < packetBytes) {
-    // A 320x240 packet needs 153,600 bytes. Keep the independent upload copy
-    // in PSRAM instead of exhausting internal RAM used by Wi-Fi and the camera.
-    const uint32_t caps = MALLOC_CAP_8BIT | (packetBytes > 65536 && psramFound() ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL);
-    uint8_t *allocated = (uint8_t *)heap_caps_realloc(packet, packetBytes, caps);
+  const size_t capacity = rawBytes + 4096;
+  if (packetCapacity < capacity) {
+    const uint32_t caps = MALLOC_CAP_8BIT | (capacity > 65536 && psramFound() ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL);
+    uint8_t *allocated = (uint8_t *)heap_caps_realloc(packet, capacity, caps);
     if (!allocated) {
       esp_camera_fb_return(frame);
       Serial.println("Packet allocation failed. Enable PSRAM for 320x240 or select QQVGA.");
@@ -126,26 +154,40 @@ void uploadFrame() {
       return;
     }
     packet = allocated;
-    packetCapacity = packetBytes;
+    packetCapacity = capacity;
   }
-  // Preserve all 16 source bits per pixel. No RGB332 color reduction.
-  memcpy(packet, frame->buf, packetBytes);
-  // Give the one driver buffer back BEFORE network I/O, allowing capture while
-  // this independent packet is uploaded. Never accumulate a queue of frames.
+  jpegBytes = 0;
+  jpegOverflow = false;
+  const bool encoded = frame2jpg_cb(frame, UPLOAD_JPEG_QUALITY, writeJpeg, nullptr);
+  // Capture may proceed while the independent compressed packet is uploaded.
   esp_camera_fb_return(frame);
+  if (!encoded || jpegOverflow || jpegBytes < 4 || packet[0] != 0xff || packet[1] != 0xd8 ||
+      packet[jpegBytes - 2] != 0xff || packet[jpegBytes - 1] != 0xd9) {
+    Serial.println("JPEG encoding failed or exceeded the bounded packet. Frame dropped.");
+    delay(25);
+    return;
+  }
+  const size_t packetBytes = jpegBytes;
   const uint32_t packedAt = millis();
   if (!httpReady) {
     String endpoint = String(SERVER_URL) + "/api/v1/robots/" + ROBOT_ID + "/camera/frame";
-    http.setConnectTimeout(750);
-    http.setTimeout(1000);
+    http.setConnectTimeout(10000);
+    http.setTimeout(10000);
     http.setReuse(true);
-    if (!http.begin(connection, endpoint)) {
-      Serial.println("Could not start HTTP request. SERVER_URL must start with http://");
+    bool requestStarted;
+    if (String(SERVER_URL).startsWith("https://")) {
+      secureConnection.useBuiltinCACertBundle();
+      requestStarted = http.begin(secureConnection, endpoint);
+    } else {
+      requestStarted = http.begin(connection, endpoint);
+    }
+    if (!requestStarted) {
+      Serial.println("Could not start HTTP request. Check SERVER_URL and TLS certificate bundle.");
       return;
     }
     httpReady = true;
   }
-  http.addHeader("Content-Type", "application/x-rgb565");
+  http.addHeader("Content-Type", "image/jpeg");
   http.addHeader("X-Camera-Width", String(width));
   http.addHeader("X-Camera-Height", String(height));
   http.addHeader("Authorization", String("Bearer ") + DEVICE_KEY);
@@ -160,7 +202,7 @@ void uploadFrame() {
     sendTotalMs += millis() - packedAt;
     const uint32_t elapsed = millis() - fpsWindowStart;
     if (elapsed >= 1000) {
-      Serial.printf("Frame %ux%u, %u bytes -> HTTP 200; %.1f fps / target %u; capture %u ms, pack %u ms, network %u ms, total %u ms\n",
+      Serial.printf("Frame %ux%u, JPEG %u bytes -> HTTP 200; %.1f fps / target %u; capture %u ms, encode %u ms, network %u ms, total %u ms\n",
           width, height, (unsigned)packetBytes, uploadedFrames * 1000.0f / elapsed, (unsigned)TARGET_FPS,
           (unsigned)(captureTotalMs / uploadedFrames), (unsigned)(packTotalMs / uploadedFrames),
           (unsigned)(sendTotalMs / uploadedFrames), (unsigned)(frameWorkMs / uploadedFrames));
@@ -220,6 +262,10 @@ void loop() {
   }
   if (!wifiReported) {
     wifiReported = true;
+    if (String(SERVER_URL).startsWith("https://")) {
+      configTime(0, 0, "pool.ntp.org", "time.google.com");
+      Serial.println("Synchronizing clock for HTTPS certificate validation...");
+    }
     Serial.print("Wi-Fi connected. Camera IP: ");
     Serial.println(WiFi.localIP());
     Serial.printf("Server: %s; Rover: %s\n", SERVER_URL, ROBOT_ID);

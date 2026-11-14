@@ -23,17 +23,30 @@ from agrisentinel.models import Robot, changed, db
 from agrisentinel.validation import identifier
 
 
+def camera_server_url(value):
+    """Accept an HTTP(S) origin, with no credentials or endpoint path."""
+    url = value.rstrip("/")
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+    except ValueError:
+        raise argparse.ArgumentTypeError("Invalid server host or port") from None
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or
+            parsed.username is not None or parsed.password is not None or
+            parsed.path or parsed.query or parsed.fragment or
+            any(c.isspace() for c in url) or (port is not None and port < 1)):
+        raise argparse.ArgumentTypeError("Use an HTTP(S) origin, e.g. https://agri-sentinel.qunivex.com")
+    return url
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--server-url", required=True, help="http://COMPUTER_WIFI_IP:5000")
+    parser.add_argument("--server-url", required=True, type=camera_server_url, help="LAN HTTP or production HTTPS origin")
     parser.add_argument("--ssid", required=True)
     parser.add_argument("--password", help="Omit to enter privately at the prompt")
     parser.add_argument("--robot-id", default="rv-camera-01")
     args = parser.parse_args()
-    url = args.server_url.rstrip("/")
-    parsed = urlparse(url)
-    if parsed.scheme != "http" or not parsed.hostname or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
-        parser.error("Use a plain LAN HTTP origin, e.g. http://192.168.1.20:5000")
+    url = args.server_url
     identifier(args.robot_id, "robot_id")
     load_dotenv(ROOT / ".env")
     app = create_app()
