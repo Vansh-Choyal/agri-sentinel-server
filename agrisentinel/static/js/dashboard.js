@@ -510,6 +510,7 @@
     try {
       const data = await api("/overview");
       state.data = data;
+      window.dispatchEvent(new CustomEvent("farm:updated", {detail: data}));
       syncTime = Date.now();
       $("#error-banner").hidden = true;
       if (!data.zones.some((z) => z.id === state.zone))

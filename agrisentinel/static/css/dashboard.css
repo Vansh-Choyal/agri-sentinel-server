@@ -2882,7 +2882,15 @@ dialog::backdrop {
 
 .demo-notice { border-left: 2px solid var(--accent); padding: 9px 12px; margin: 0 0 24px; color: var(--secondary); font-size: 13px; line-height: 1.5; }
 .crop-caption { display: block; color: var(--secondary); font-size: 12px; margin-top: 3px; }
+.alert-notification { position: fixed; top: 84px; right: 24px; z-index: 35; width: min(360px, calc(100vw - 32px)); background: var(--surface); border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: var(--radius); }
+.alert-notification-open { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; width: 100%; padding: 18px 44px 18px 18px; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.alert-notification-open strong { font-size: 15px; font-weight: 500; }
+.alert-notification-detail { color: var(--secondary); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.alert-notification-action { color: var(--accent); font-size: 12px; }
+.alert-notification > .icon-button { position: absolute; top: 8px; right: 8px; }
+@media (max-width: 760px) { .alert-notification { top: 72px; right: 16px; } }
 @media print {
+  .alert-notification { display: none !important; }
   body, .panel, .report-block, .report-banner { background: white !important; color: #222 !important; }
   .demo-notice { color: #333; }
 }

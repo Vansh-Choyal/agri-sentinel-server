@@ -29,6 +29,8 @@ On first activation, the app generates 30 days of half-hourly demo history. Char
 
 The chatbot receives the same stored readings and crop plan, current alerts and commands, project capabilities/limitations, and a past-24-hour statistical summary. It can answer judges' questions about crops, conditions, thresholds and implemented features without presenting generated data as tested hardware results. DeepInfra credentials are still required for model answers.
 
+While the dashboard is open, in-app notifications randomly select active alerts. The first opportunity is after 8–15 seconds, then every 35–70 seconds, with a two-minute cooldown per alert. Demo/simulator alerts are labeled. Notices pause in hidden tabs, during dialogs and while using the chatbot; acknowledged/resolved alerts stop notifying. Clicking a notice opens the chatbot with the alert details in a draft question, preserving any existing draft. It does not automatically send the question or request browser notification permission.
+
 In Reports, Generate, both CSV actions and Print / PDF respect the selected period, zone and ending time. CSV uses the exact bounds of the generated on-screen report. Daily, weekly and monthly summaries include demo history immediately. Print / PDF opens the browser print dialog; choose Save as PDF there.
 
 To use physical devices only, set `DEMO_DATA=false` in `.env` and restart. Existing demo records remain labeled in history; they are not deleted. The optional `python -m simulator` is only for independent HTTP protocol testing with devices registered as `simulator`; adopted built-in demo rover IDs do not accept device telemetry.

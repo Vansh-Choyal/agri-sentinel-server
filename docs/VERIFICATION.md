@@ -134,3 +134,10 @@ Visual browser automation was unavailable. Chart rasterization, desktop/mobile l
 - Per-zone source metadata now lets the chart connect intentionally sparse generated samples into bounded curves while preserving hardware null buckets. No interpolated samples are inserted into statistics or CSV exports. Removed the incorrect chart optimization that assumed identical time indexes for all series.
 - Full backend run: 129 passed. Additional frontend DOM checks passed for all nine demo metrics without empty-bucket fragments, with a network double confirming that hardware gaps remain visible. Existing report/download/print invocation and chat checks also pass. Actual chart rasterization remains unverified in a browser.
 - Stopped stale local app instances and restarted one current server on port 5000.
+
+## 2026-11-17: Randomized in-app alert notifications
+
+- Added a dismissible notice using current active alerts from the authenticated farm snapshot. Demo/simulator sources are labeled, repeated alerts have a two-minute cooldown, and no alerts are fabricated for the notification feature.
+- Clicking opens Chatbot and prepares a question containing the alert ID, rover, plot, source, opening time and condition details. Existing drafts are retained; the question is not automatically submitted. Existing language selection remains in place.
+- Timers pause in hidden tabs, and notices are suppressed in Chatbot and open dialogs. Stale snapshots and acknowledged/resolved alerts do not generate notices. The notice is excluded from printed reports.
+- JavaScript syntax checks and `npm run test:ui` passed. Deterministic timer checks exercise random scheduling, cooldown, dismissal, source labeling, stale/hidden-tab behavior and the actual chatbot draft handler without sending a model request. Existing report/chart/navigation/chat/voice checks also passed. Browser visual rendering remains unverified.

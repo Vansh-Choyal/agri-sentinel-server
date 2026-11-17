@@ -5,6 +5,7 @@
   const input = $("#chat-input"), log = $("#chat-messages"), dialog = $("#chat-language-dialog");
   let history = [], language = "", configured = false, loading = false, loaded = false;
   let busy = false, voiceMode = false, controller, generation = 0, pending;
+  let alertDraft = "";
   const onPage = () => (location.hash.slice(1) || (location.pathname === "/chatbot" ? "chatbot" : "overview")) === "chatbot";
   const status = (text) => { $("#chat-status").textContent = text; };
   function error(text = "") {
@@ -12,6 +13,11 @@
     $("#voice-error").textContent = text; $("#voice-error").hidden = !text;
   }
   function controls() {
+    if (alertDraft && !busy) {
+      input.value = input.value.trim() ? `${input.value}\n\n${alertDraft}` : alertDraft;
+      input.rows = Math.min(5, Math.max(1, input.value.split("\n").length));
+      alertDraft = "";
+    }
     input.disabled = busy || !configured || !language;
     $("#chat-send").disabled = input.disabled;
     $("#chat-send").hidden = busy; $("#chat-stop").hidden = !busy;
@@ -238,6 +244,14 @@
     if (!configured) { loaded = false; load(); } else if (!voiceMode) input.focus();
   }
   $("#chat-new").addEventListener("click", reset); window.addEventListener("chat:reset", reset);
+  window.addEventListener("chat:alert", (event) => {
+    const alert = event.detail;
+    if (!alert || !Number.isInteger(alert.id) || typeof alert.title !== "string") return;
+    alertDraft = `Explain alert #${alert.id}: ${alert.title}.\nRover: ${alert.robot_id}; plot: ${alert.zone_id || "fleet"}; source: ${alert.source}; opened: ${alert.opened_at || "unknown"}.\n${alert.detail}\nWhat does this mean, and what should I check next?`;
+    controls();
+    load();
+    if (!input.disabled) input.focus();
+  });
   window.addEventListener("hashchange", () => {
     if (onPage()) load(); else { if (dialog.open) dialog.close(); leaveVoice(); }
   });

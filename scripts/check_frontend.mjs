@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { checkChat } from "./chat_checks.mjs";
+import { checkNotifications } from "./notification_checks.mjs";
 
 try {
   process.loadEnvFile(fileURLToPath(new URL("../.env", import.meta.url)));
@@ -327,6 +328,7 @@ try {
   assert.ok(d.querySelector("#navigation-backdrop").hidden);
   process.stdout.write("PASS removed decoration, dialog names and mobile keyboard navigation\n");
   await checkChat(w, d, wait, navigate);
+  await checkNotifications(html, w, navigate, wait);
   assert.deepEqual(errors, []);
   process.stdout.write("Frontend DOM checks passed. Chart rasterization and responsive visual QA require a browser.\n");
 } finally {
