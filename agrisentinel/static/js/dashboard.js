@@ -324,7 +324,7 @@
     return data;
   }
   function sourceBadge(source) {
-    return `<span class="source-tag ${source === "simulator" ? "simulator" : ""}">${source === "simulator" ? "Simulated" : "Hardware"}</span>`;
+    return `<span class="source-tag ${source !== "hardware" ? "simulator" : ""}">${source === "demo" ? "Demo data" : source === "simulator" ? "Simulated" : "Hardware"}</span>`;
   }
   function statusBadge(robot) {
     return `<span class="status-badge ${robot.online ? "" : "offline"}">${robot.online ? "Online" : robot.last_seen ? "Offline" : "Not connected"}</span>`;
@@ -344,6 +344,7 @@
   }
 
   function renderMetrics(data) {
+    $("#demo-notice").hidden = !data.demo;
     const c = data.counts;
     const items = [
       ["Registered rovers", c.total, "devices enrolled", ""],
@@ -475,7 +476,7 @@
           .join("")
       : empty(
           "No telemetry received yet.",
-          "Run python -m simulator in a separate terminal to begin.",
+          "Waiting for the next data update.",
           "chart",
         );
   }
@@ -576,7 +577,7 @@
       type: "line",
       data: {
         datasets: datasets.map((d, index) => ({
-          borderDash: [[], [6, 4], [2, 3], [8, 3, 2, 3], [12, 4], [4, 3]][index % 6],
+          borderDash: [[], [7, 4], [3, 3], [9, 3], [5, 3], [2, 4]][index % 6],
           pointRadius: d.data.filter((p) => p.y !== null).length <= 2 ? 3 : 0,
           pointHoverRadius: 3,
           borderWidth: 1.6,
@@ -588,10 +589,10 @@
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        animation: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        animation: options.animation === false || window.matchMedia("(prefers-reduced-motion: reduce)").matches
           ? false
           : { duration: 250 },
-        normalized: true,
+        normalized: false,
         interaction: { mode: "nearest", intersect: false },
         parsing: false,
         plugins: {
@@ -656,6 +657,15 @@
       state.charts[id].update();
     } else state.charts[id] = new Chart(canvas, config);
   }
+  function sampledCurve(points, sources, bucketSeconds) {
+    const demoOnly = sources?.demo > 0 && Object.keys(sources).length === 1;
+    // Demo history is deliberately sampled less frequently than live readings.
+    // Draw its stored samples as a curve; preserve nulls for device histories.
+    return {
+      data: demoOnly ? points.filter((point) => point.y !== null) : points,
+      spanGaps: demoOnly ? Math.max(7200, bucketSeconds * 2) * 1000 : false,
+    };
+  }
   function zoneDatasets(data, key) {
     const colors = [
       "#6b9fff",
@@ -668,9 +678,9 @@
     return data.zones.map((z, index) => ({
       label: shortZone(z.id),
       borderColor: colors[index % colors.length],
-      data: data.points
+      ...sampledCurve(data.points
         .filter((p) => p.zone_id === z.id)
-        .map((p) => ({ x: new Date(p.at).getTime(), y: p[key] })),
+        .map((p) => ({ x: new Date(p.at).getTime(), y: p[key] })), z.sources, data.bucket_seconds),
     }));
   }
   async function loadOverviewChart() {
@@ -687,7 +697,7 @@
         label: metrics[key].label,
         unit: metrics[key].unit,
         borderColor: metrics[key].color,
-        data: [...byTime]
+        ...sampledCurve([...byTime]
           .sort(([a], [b]) => a.localeCompare(b))
           .map(([at, points]) => {
             const valid = points.filter((p) => p[key] !== null);
@@ -697,7 +707,7 @@
                 ? valid.reduce((s, p) => s + p[key], 0) / valid.length
                 : null,
             };
-          }),
+          }), data.sources, data.bucket_seconds),
       }),
     );
     drawChart("overview-chart", datasets, "");
@@ -779,7 +789,7 @@
       ? "Raw ADC readings only. No calibrated gas concentration or disease inference. Missing values remain gaps."
       : key === "heading_deg"
         ? "Compass averages use circular statistics. An undefined direction is shown as a gap."
-        : "Averages per time bucket. Missing measurements remain gaps; activity is never inferred between readings.";
+        : "Time-bucket averages. Demo curves connect sampled history; missing hardware readings remain gaps.";
     $("#analytics-comparison").innerHTML = data?.zones.length
       ? `<table><thead><tr><th>ZONE</th><th>Valid readings</th><th>MINIMUM (${meta.unit})</th><th>MAXIMUM (${meta.unit})</th><th>${key === "heading_deg" ? "CIRCULAR AVG" : "AVERAGE"} (${meta.unit})</th></tr></thead><tbody>${data.zones.map((z) => `<tr><td>${esc(shortZone(z.id))} <span class="muted">/ ${esc(z.name)}</span></td><td class="mono">${num(z.statistics[key].count)}</td><td class="mono">${fmt(z.statistics[key].min)}</td><td class="mono">${fmt(z.statistics[key].max)}</td><td class="mono">${fmt(z.statistics[key].avg)}</td></tr>`).join("")}</tbody></table>`
       : empty(
@@ -856,21 +866,39 @@
     $("#load-alerts").hidden = !state.alertCursor;
   }
 
-  async function loadReport() {
+  let reportLoading = null;
+  function loadReport() {
+    if (reportLoading) return reportLoading;
+    reportLoading = generateReport().finally(() => { reportLoading = null; });
+    return reportLoading;
+  }
+  async function generateReport() {
     const params = new URLSearchParams({ period: $("#report-period").value });
     if ($("#report-zone").value) params.set("zones", $("#report-zone").value);
-    if ($("#report-end").value)
-      params.set("to", new Date($("#report-end").value + "Z").toISOString());
+    if ($("#report-end").value) {
+      const end = new Date($("#report-end").value + "Z");
+      if (!Number.isFinite(end.getTime())) throw new Error("Choose a valid report ending date.");
+      params.set("to", end.toISOString());
+    }
     const button = $("#report-form button");
+    const filters = $$("#report-form select, #report-form input");
+    filters.forEach((control) => { control.disabled = true; });
     button.disabled = true;
+    $("#report-content").setAttribute("aria-busy", "true");
     try {
       const data = await api("/reports?" + params);
       state.report = data;
+      // Freeze the server's exact bounds so CSV and the rendered report agree.
+      params.set("from", data.from);
+      params.set("to", data.to);
       state.reportQuery = params.toString();
       renderReport();
       addReportTrend();
+      $("#error-banner").hidden = true;
     } finally {
       button.disabled = false;
+      filters.forEach((control) => { control.disabled = false; });
+      $("#report-content").setAttribute("aria-busy", "false");
     }
   }
   function renderReport() {
@@ -889,14 +917,14 @@
       })
       .join("");
     $("#report-content").innerHTML =
-      `<div class="report-banner"><div><p class="eyebrow">${r.period.toUpperCase()} / MEASUREMENT SUMMARY</p><h2>Field observation report</h2><p class="muted">${r.zones.length} zones with data · ${r.robots.length} reporting rovers · ${num(r.alert_count)} overlapping alerts</p></div><div class="report-count">${num(r.record_count)}<small>telemetry records</small></div></div>${!r.record_count ? empty("No measurements in this period.", "The report remains empty until telemetry is received.") : ""}<section class="report-block"><h3>Environmental & device measurements</h3><div class="table-wrap"><table><thead><tr><th>Measurement</th><th>UNIT</th><th>Valid samples</th><th>Minimum</th><th>Maximum</th><th>Average</th></tr></thead><tbody>${statsRows}</tbody></table></div><p class="report-sources">SOURCES / ${
+      `<div class="report-banner"><div><p class="eyebrow">${r.period.toUpperCase()} / MEASUREMENT SUMMARY</p><h2>Field observation report</h2><p class="muted">${r.demo ? "Demo data / " : ""}${r.zones.length} zones with data · ${r.robots.length} reporting rovers · ${num(r.alert_count)} overlapping alerts</p></div><div class="report-count">${num(r.record_count)}<small>telemetry records</small></div></div>${!r.record_count ? empty("No measurements in this period.", "The report remains empty until telemetry is received.") : ""}<section class="report-block"><h3>Environmental & device measurements</h3><div class="table-wrap"><table><thead><tr><th>Measurement</th><th>UNIT</th><th>Valid samples</th><th>Minimum</th><th>Maximum</th><th>Average</th></tr></thead><tbody>${statsRows}</tbody></table></div><p class="report-sources">SOURCES / ${
         Object.entries(r.sources)
           .map(
             ([source, count]) =>
               `${source.toUpperCase()}: ${num(count)} samples`,
           )
           .join(" · ") || "NO DATA"
-      }</p></section><section class="report-block"><h3>Zone comparison</h3><div class="table-wrap">${r.zones.length ? `<table><thead><tr><th>Partition</th><th>Records</th><th>AVG TEMP °C</th><th>AVG HUMIDITY %</th><th>AVG SOIL %</th></tr></thead><tbody>${r.zones.map((z) => `<tr><td>${esc(shortZone(z.id))} / ${esc(z.name)}</td><td class="mono">${num(z.count)}</td><td class="mono">${fmt(z.statistics.temperature_c.avg)}</td><td class="mono">${fmt(z.statistics.humidity_pct.avg)}</td><td class="mono">${fmt(z.statistics.soil_moisture_pct.avg)}</td></tr>`).join("")}</tbody></table>` : empty("No zone measurements.")}</div></section><section class="report-block"><h3>Rover activity / reported state samples</h3><div class="table-wrap">${r.robots.length ? `<table><thead><tr><th>Rover</th><th>Records</th><th>Patrolling</th><th>Inspecting</th><th>IDLE</th><th>Stopped</th><th>Error</th></tr></thead><tbody>${r.robots.map((robot) => `<tr><td>${esc(robot.name)} <span class="mono muted">/ ${esc(robot.id)}</span></td><td class="mono">${num(robot.records)}</td>${["patrolling", "inspecting", "idle", "stopped", "error"].map((s) => `<td class="mono">${num(robot.state_samples[s])}</td>`).join("")}</tr>`).join("")}</tbody></table>` : empty("No rover activity.")}</div></section><section class="report-block"><h3>Conditions during period / ${num(r.alert_count)}</h3><div class="table-wrap">${r.alerts.length ? `<table><thead><tr><th>Condition</th><th>Rover / zone</th><th>Severity</th><th>Opened utc</th><th>Current status</th></tr></thead><tbody>${r.alerts.map((a) => `<tr><td>${esc(a.title)}</td><td>${esc(a.robot_id)} / ${esc(a.zone_id || "FLEET")}</td><td>${esc(a.severity)}</td><td class="mono">${dateTime(a.opened_at)}</td><td>${esc(a.status)}</td></tr>`).join("")}</tbody></table>` : empty("No alerts overlapped this period.")}</div></section><section class="report-block"><h3>Checkpoint inspections / ${num(r.inspection_count)}</h3><div class="table-wrap">${r.inspections.length ? `<table><thead><tr><th>Rover</th><th>ZONE</th><th>Checkpoint</th><th>Reported utc</th></tr></thead><tbody>${r.inspections.map((i) => `<tr><td class="mono">${esc(i.robot_id)}</td><td>${esc(shortZone(i.zone_id))}</td><td class="mono">${esc(i.checkpoint_id)}</td><td class="mono">${dateTime(i.at)}</td></tr>`).join("")}</tbody></table>` : empty("No checkpoint inspections reported.")}</div></section><p class="report-note">Measurements with missing values are excluded from statistics. Compass heading uses a circular mean; an undefined mean is shown as “—”. Rover activity counts represent telemetry samples, not operating duration. Alerts include conditions overlapping the period; detail lists are capped at 200 alerts and 100 inspections. No crop health, diagnosis, or yield is inferred.</p>`;
+      }</p></section><section class="report-block"><h3>Zone comparison</h3><div class="table-wrap">${r.zones.length ? `<table><thead><tr><th>Partition</th><th>Records</th><th>AVG TEMP °C</th><th>AVG HUMIDITY %</th><th>AVG SOIL %</th></tr></thead><tbody>${r.zones.map((z) => `<tr><td>${esc(shortZone(z.id))} / ${esc(z.name)}<small class="crop-caption">${esc(z.crop || "Crop unspecified")}</small></td><td class="mono">${num(z.count)}</td><td class="mono">${fmt(z.statistics.temperature_c.avg)}</td><td class="mono">${fmt(z.statistics.humidity_pct.avg)}</td><td class="mono">${fmt(z.statistics.soil_moisture_pct.avg)}</td></tr>`).join("")}</tbody></table>` : empty("No zone measurements.")}</div></section><section class="report-block"><h3>Rover activity / reported state samples</h3><div class="table-wrap">${r.robots.length ? `<table><thead><tr><th>Rover</th><th>Records</th><th>Patrolling</th><th>Inspecting</th><th>IDLE</th><th>Stopped</th><th>Error</th></tr></thead><tbody>${r.robots.map((robot) => `<tr><td>${esc(robot.name)} <span class="mono muted">/ ${esc(robot.id)}</span></td><td class="mono">${num(robot.records)}</td>${["patrolling", "inspecting", "idle", "stopped", "error"].map((s) => `<td class="mono">${num(robot.state_samples[s])}</td>`).join("")}</tr>`).join("")}</tbody></table>` : empty("No rover activity.")}</div></section><section class="report-block"><h3>Conditions during period / ${num(r.alert_count)}</h3><div class="table-wrap">${r.alerts.length ? `<table><thead><tr><th>Condition</th><th>Rover / zone</th><th>Severity</th><th>Opened utc</th><th>Current status</th></tr></thead><tbody>${r.alerts.map((a) => `<tr><td>${esc(a.title)}</td><td>${esc(a.robot_id)} / ${esc(a.zone_id || "FLEET")}</td><td>${esc(a.severity)}</td><td class="mono">${dateTime(a.opened_at)}</td><td>${esc(a.status)}</td></tr>`).join("")}</tbody></table>` : empty("No alerts overlapped this period.")}</div></section><section class="report-block"><h3>Checkpoint inspections / ${num(r.inspection_count)}</h3><div class="table-wrap">${r.inspections.length ? `<table><thead><tr><th>Rover</th><th>ZONE</th><th>Checkpoint</th><th>Reported utc</th></tr></thead><tbody>${r.inspections.map((i) => `<tr><td class="mono">${esc(i.robot_id)}</td><td>${esc(shortZone(i.zone_id))}</td><td class="mono">${esc(i.checkpoint_id)}</td><td class="mono">${dateTime(i.at)}</td></tr>`).join("")}</tbody></table>` : empty("No checkpoint inspections reported.")}</div></section><p class="report-note">Measurements with missing values are excluded from statistics. Compass heading uses a circular mean; an undefined mean is shown as “—”. Rover activity counts represent telemetry samples, not operating duration. Alerts include conditions overlapping the period; detail lists are capped at 200 alerts and 100 inspections. No crop health, diagnosis, or yield is inferred.</p>`;
   }
 
   function addReportTrend() {
@@ -904,13 +932,13 @@
     if (!block || !state.report) return;
     block.insertAdjacentHTML(
       "afterend",
-      '<section class="report-block panel chart-panel"><div class="panel-header"><h3>Temperature trend / zone comparison</h3><span class="subtle-tag">°C / UTC</span></div><div class="chart-wrap"><canvas id="report-chart" role="img" aria-label="Reported temperature trends by zone"></canvas><div id="report-chart-empty" class="chart-empty" hidden>No trend measurements in this period.</div></div><p class="panel-footnote">Time-bucket averages from stored samples. Gaps indicate unavailable measurements.</p></section>',
+      '<section class="report-block panel chart-panel"><div class="panel-header"><h3>Temperature trend / zone comparison</h3><span class="subtle-tag">°C / UTC</span></div><div class="chart-wrap"><canvas id="report-chart" role="img" aria-label="Reported temperature trends by zone"></canvas><div id="report-chart-empty" class="chart-empty" hidden>No trend measurements in this period.</div></div><p class="panel-footnote">Time-bucket averages from stored samples. Demo curves connect sampled history; hardware gaps remain visible.</p></section>',
     );
     drawChart(
       "report-chart",
       zoneDatasets(state.report, "temperature_c"),
       "°C",
-      { legend: true },
+      { legend: true, animation: false },
     );
   }
 
@@ -932,7 +960,7 @@
       )
       .join("");
     $("#detail-content").innerHTML =
-      `<div class="dialog-heading"><span class="rover-glyph">${icon("rover")}</span><div><h2>${esc(r.name)}</h2><p>${esc(r.id)} / ${esc(r.model)}</p></div></div><div id="detail-live-status">${statusBadge(r)} &nbsp; ${sourceBadge(r.source)} &nbsp; ${stateLabel(r)} ${r.stale ? ' &nbsp; <span class="stale-indicator">Stale telemetry</span>' : ""}</div><dl class="detail-meta"><div><dt>Last contact</dt><dd id="detail-contact">${relative(r.last_seen)}</dd></div><div><dt>Last measurement</dt><dd id="detail-recorded">${relative(r.latest_recorded_at)}</dd></div><div><dt>Battery</dt><dd>${r.battery_pct === null ? "Not reported" : fmt(r.battery_pct) + "%"}</dd></div><div><dt>Firmware</dt><dd>${esc(r.firmware)}</dd></div><div><dt>Device uptime</dt><dd id="detail-uptime">${r.uptime_ms === null ? "Not reported" : fmt(r.uptime_ms / 60000) + " min"}</dd></div><div><dt>Registered</dt><dd>${dateTime(r.registered_at)}</dd></div></dl><div class="detail-sensors">${sensorHtml}</div><section class="detail-section"><h3>Zone assignment</h3><form class="assignment-form" id="assignment-form"><select name="zone_id" aria-label="Assign rover to zone"><option value="">Unassigned</option>${state.data.zones.map((z) => `<option value="${esc(z.id)}" ${r.zone_id === z.id ? "selected" : ""}>${esc(shortZone(z.id))} / ${esc(z.name)}</option>`).join("")}</select><button class="button">Update</button></form><p class="detail-caption">The simulator reads assignment changes on its next polling cycle.</p></section><section class="detail-section"><h3>Device commands</h3><div class="command-controls">${["patrol", "inspect", "idle", "stop"].map((action) => `<button class="button" data-command="${action}">${action === "stop" ? "■ Stop" : action.charAt(0).toUpperCase() + action.slice(1)}</button>`).join("")}</div><p class="detail-caption">Queued for device acknowledgement. Commands expire after five minutes.</p><div class="detail-history" id="command-history">${commandsHtml(data.commands)}</div></section><section class="detail-section"><h3>Temperature history / past 24 hours</h3><div class="chart-wrap"><canvas id="rover-chart" aria-label="Rover temperature history" role="img"></canvas><div id="rover-chart-empty" class="chart-empty" hidden>No measurements in this period.</div></div></section><section class="detail-section"><h3>Recent checkpoint inspections</h3><div class="detail-history">${
+      `<div class="dialog-heading"><span class="rover-glyph">${icon("rover")}</span><div><h2>${esc(r.name)}</h2><p>${esc(r.id)} / ${esc(r.model)}</p></div></div><div id="detail-live-status">${statusBadge(r)} &nbsp; ${sourceBadge(r.source)} &nbsp; ${stateLabel(r)} ${r.stale ? ' &nbsp; <span class="stale-indicator">Stale telemetry</span>' : ""}</div><dl class="detail-meta"><div><dt>Last contact</dt><dd id="detail-contact">${relative(r.last_seen)}</dd></div><div><dt>Last measurement</dt><dd id="detail-recorded">${relative(r.latest_recorded_at)}</dd></div><div><dt>Battery</dt><dd>${r.battery_pct === null ? "Not reported" : fmt(r.battery_pct) + "%"}</dd></div><div><dt>Firmware</dt><dd>${esc(r.firmware)}</dd></div><div><dt>Device uptime</dt><dd id="detail-uptime">${r.uptime_ms === null ? "Not reported" : fmt(r.uptime_ms / 60000) + " min"}</dd></div><div><dt>Registered</dt><dd>${dateTime(r.registered_at)}</dd></div></dl><div class="detail-sensors">${sensorHtml}</div><section class="detail-section"><h3>Zone assignment</h3><form class="assignment-form" id="assignment-form"><select name="zone_id" aria-label="Assign rover to zone"><option value="">Unassigned</option>${state.data.zones.map((z) => `<option value="${esc(z.id)}" ${r.zone_id === z.id ? "selected" : ""}>${esc(shortZone(z.id))} / ${esc(z.name)}</option>`).join("")}</select><button class="button">Update</button></form><p class="detail-caption">Assignment changes apply on the next data update.</p></section><section class="detail-section"><h3>Device commands</h3><div class="command-controls">${["patrol", "inspect", "idle", "stop"].map((action) => `<button class="button" data-command="${action}">${action === "stop" ? "■ Stop" : action.charAt(0).toUpperCase() + action.slice(1)}</button>`).join("")}</div><p class="detail-caption">Queued for device acknowledgement. Commands expire after five minutes.</p><div class="detail-history" id="command-history">${commandsHtml(data.commands)}</div></section><section class="detail-section"><h3>Temperature history / past 24 hours</h3><div class="chart-wrap"><canvas id="rover-chart" aria-label="Rover temperature history" role="img"></canvas><div id="rover-chart-empty" class="chart-empty" hidden>No measurements in this period.</div></div></section><section class="detail-section"><h3>Recent checkpoint inspections</h3><div class="detail-history">${
         data.inspections.length
           ? data.inspections
               .slice(0, 10)
@@ -1215,7 +1243,7 @@
       else if (state.page === "field") window.location.hash = "analytics";
       else if (state.page === "alerts") await showRules();
       else if (state.page === "reports")
-        window.location.assign($("#csv-export").href);
+        await downloadReport();
       else window.location.hash = "reports";
     } catch (error) {
       toast(error.message, true);
@@ -1275,7 +1303,30 @@
     event.preventDefault();
     loadReport().catch(showError);
   });
-  $("#print-report").addEventListener("click", () => window.print());
+  async function downloadReport() {
+    await loadReport();
+    const response = await fetch($("#csv-export").href, { cache: "no-store" });
+    if (!response.ok) throw new Error("CSV download failed. Please sign in again if your session expired.");
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = response.headers.get("Content-Disposition")?.match(/filename=([^;]+)/)?.[1] || "agrisentinel-report.csv";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  $("#csv-export").addEventListener("click", (event) => {
+    event.preventDefault();
+    downloadReport().catch(showError);
+  });
+  $("#print-report").addEventListener("click", async () => {
+    try {
+      await loadReport();
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      window.print();
+    } catch (error) { showError(error); }
+  });
   $("#retry-button").addEventListener("click", () => refreshOverview(true));
   window.addEventListener("hashchange", () => route().then(() => $("#page-title").focus({preventScroll: true})).catch(showError));
   $("#detail-dialog").addEventListener("close", () => {

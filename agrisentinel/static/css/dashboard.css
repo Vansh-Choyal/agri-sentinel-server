@@ -192,7 +192,10 @@ time {
   width: 100%;
   max-width: 192px;
   height: auto;
-  border-radius: var(--radius);
+  /* Preserve the supplied leaf and wordmark while removing the white tile. */
+  filter: grayscale(1) invert(1) brightness(1.7);
+  mix-blend-mode: screen;
+  border-radius: 0;
 }
 
 .brand-mark {
@@ -2876,3 +2879,10 @@ dialog::backdrop {
   .language-option { padding: 10px; }
 }
 @media (prefers-reduced-motion: reduce) { .chat-thinking i { animation: none; opacity: .65; } }
+
+.demo-notice { border-left: 2px solid var(--accent); padding: 9px 12px; margin: 0 0 24px; color: var(--secondary); font-size: 13px; line-height: 1.5; }
+.crop-caption { display: block; color: var(--secondary); font-size: 12px; margin-top: 3px; }
+@media print {
+  body, .panel, .report-block, .report-banner { background: white !important; color: #222 !important; }
+  .demo-notice { color: #333; }
+}

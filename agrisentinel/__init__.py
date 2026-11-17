@@ -34,6 +34,7 @@ def create_app(config=None):
         ADMIN_PASSWORD_MIN_LENGTH=max(8, int(os.getenv("ADMIN_PASSWORD_MIN_LENGTH", "12"))),
         SEED_DATA=True,
         SIM_ROVER_COUNT=int(os.getenv("SIM_ROVER_COUNT", "4")),
+        DEMO_DATA=os.getenv("DEMO_DATA", "true").lower() == "true",
         MAX_SSE_CLIENTS=12,
         DEEPINFRA_API_KEY=os.getenv("DEEPINFRA_API_KEY", ""),
         DEEPINFRA_CHAT_MODEL=os.getenv("DEEPINFRA_CHAT_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507"),
@@ -45,6 +46,8 @@ def create_app(config=None):
     )
     if config:
         app.config.update(config)
+    if app.testing and (not config or "DEMO_DATA" not in config):
+        app.config["DEMO_DATA"] = False
     if os.getenv("APP_ENV") == "production" and not config:
         if not os.getenv("SECRET_KEY") or not os.getenv("ADMIN_PASSWORD"):
             raise RuntimeError("Production requires explicit SECRET_KEY and ADMIN_PASSWORD")
@@ -67,6 +70,26 @@ def create_app(config=None):
         init_admin(app)
         from .seed import initialize
         initialize(app)
+        from .services.demo import initialize_demo
+        initialize_demo()
+
+    # WSGI deployments also refresh on requests without a separate process.
+    import threading
+    import time
+    demo_lock = threading.Lock()
+    app.extensions["demo_refreshed"] = 0.
+
+    @app.before_request
+    def refresh_demo():
+        if not app.config["DEMO_DATA"] or not request.path.startswith("/api/v1/"):
+            return
+        if time.monotonic() - app.extensions["demo_refreshed"] < 5:
+            return
+        with demo_lock:
+            if time.monotonic() - app.extensions["demo_refreshed"] >= 5:
+                from .services.demo import update_demo
+                update_demo()
+                app.extensions["demo_refreshed"] = time.monotonic()
 
     @app.after_request
     def security_headers(response):

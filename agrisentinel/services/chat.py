@@ -67,10 +67,24 @@ def provider(path, **kwargs):
 
 
 def farm_snapshot():
+    from .demo import profile
+    from .analytics import aggregate
     now = utcnow()
     robots = [robot_dict(r) for r in db.session.scalars(select(Robot).order_by(Robot.id).limit(200))]
     snapshot = {
         "as_of": iso(now),
+        "demonstration": profile(),
+        "project_facts": {
+            "purpose": "School prototype for field condition monitoring, rover inspection checkpoints and operator alerts.",
+            "architecture": {"backend": "Python / Flask", "persistence": f"SQLAlchemy with {db.engine.dialect.name}",
+                             "frontend": "Jinja, vanilla JavaScript, bundled Chart.js", "updates": "Server-sent events with periodic REST fallback",
+                             "device_protocol": "Schema-version-1 JSON telemetry over HTTP(S); independent per-rover Bearer keys; commands polled and acknowledged by devices",
+                             "validation": "Sensor range/type/time validation, duplicate event protection, zone ownership checks; missing readings excluded from averages",
+                             "operator_access": "Session authentication and CSRF-protected mutations"},
+            "current_capabilities": ["Authenticated dashboard and reports", "Threshold alerts with recovery bands", "Patrol/inspect/stop/idle command queue", "Latest JPEG camera viewer when a camera uploads", "Multilingual assistant grounded in this snapshot"],
+            "limitations": ["Demo values are generated, not physical measurements", "No automatic irrigation actuator", "No validated crop disease detection or yield prediction", "No GPS tracking; field map is schematic", "Raw MQ/sound readings are not calibrated concentrations or decibels", "No field-validated water savings or accuracy results"],
+            "demo_behavior": "Three demo rovers each patrol a pair of plots, changing plots every ten minutes during the day, and park overnight. The separately registered ESP32 camera rover retains its hardware identity; its camera feed is not generated. Shared day/night weather, inverse temperature/humidity changes and staggered irrigation/drying are illustrative assumptions, not observed causes.",
+        },
         "fields": [{"id": f.id, "name": f.name, "area_ha": f.area_ha, "description": f.description} for f in db.session.scalars(select(Field).limit(200))],
         "rovers": robots,
         "zones": [zone_dict(z) for z in db.session.scalars(select(Zone).order_by(Zone.id).limit(200))],
@@ -84,6 +98,8 @@ def farm_snapshot():
         "timeouts_seconds": {"stale": current_app.config["STALE_TIMEOUT_SECONDS"], "offline": current_app.config["OFFLINE_TIMEOUT_SECONDS"]},
         "scope": "Latest readings per rover and zone; up to 24 recent samples, 30 recent alerts and 20 commands. Not a complete historical report. Inspection coverage is for today UTC.",
     }
+    daily = aggregate({"period": "24h"})
+    snapshot["past_24_hours"] = {key: daily[key] for key in ("from", "to", "record_count", "statistics", "sources")}
     # Release the read transaction before waiting on a network service.
     db.session.rollback()
     return snapshot
@@ -95,10 +111,16 @@ def completion_payload(messages, language, voice=False):
         "You are AgriSentinel's helpful assistant for a school competition project. You can explain the project, "
         "answer common general-knowledge and everyday questions, and help users understand farm monitoring. "
         "For questions about current rover or farm status, use the supplied snapshot as the source of truth. "
-        f"Reply in {LANGUAGES[language]}, normally using its native script. Keep technical names, IDs and units readable. "
+        f"Reply exclusively in {LANGUAGES[language]}, normally using its native script. Keep technical names, IDs and units readable. "
         "Answer the question directly; do not refuse simply because it is not about farming. If a question is outside "
         "the available information, say what you know generally and clearly distinguish it from live project data. "
         "Preserve exact device IDs, numbers and units. "
+        "For judges' questions, use zone crop and cultivation details, demonstration farm plan, project_facts, "
+        "and past_24_hours statistics. Name all planted crops and the fallow plot when asked what is growing. "
+        "Cultivation dates and growth stages are configured demo assumptions, not sensor detections. "
+        "When demonstration is present, naturally identify current demo readings as demonstration data; "
+        "never describe them as field-tested hardware results or real local weather. "
+        "Explain what is implemented versus planned; do not invent costs, measured accuracy, savings, novelty or hardware specifications. "
         "Distinguish simulated data from physical hardware. State when readings are stale, absent or unknown. If there has never been contact or a reading, say no data has arrived; do not claim it was lost or assign an age. "
         "Do not invent measurements, historical trends, causes, diagnoses, weather or successful commands. "
         "MQ readings and sound levels are raw ADC, not calibrated gas concentrations or disease indicators. "

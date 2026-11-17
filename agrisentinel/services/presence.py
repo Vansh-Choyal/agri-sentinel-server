@@ -29,6 +29,8 @@ def start_monitor(app):
         while not stop.wait(app.config["MONITOR_INTERVAL_SECONDS"]):
             with app.app_context():
                 try:
+                    from .demo import update_demo
+                    update_demo()
                     monitor_once()
                 except Exception:
                     db.session.rollback()

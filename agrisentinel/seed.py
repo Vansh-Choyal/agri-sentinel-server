@@ -33,7 +33,8 @@ def initialize(app):
             db.session.add(Zone(id=f"zone-{letter}", field_id="field-01", name=name, crop=crop, area_ha=area, map_col=index % 3, map_row=index // 3, checkpoint_count=8))
         db.session.flush()
         rovers = []
-        for index in range(max(1, min(6, app.config["SIM_ROVER_COUNT"]))):
+        count = 3 if app.config.get("DEMO_DATA") else max(1, min(6, app.config["SIM_ROVER_COUNT"]))
+        for index in range(count):
             rid, zid = f"rv-{index + 1:03d}", f"zone-{chr(97 + index)}"
             key = secrets.token_urlsafe(32)
             db.session.add(Robot(id=rid, name=f"Sentinel {index + 1:02d}", zone_id=zid, api_key_hash=key_hash(key), source="simulator", model="AgriSentinel S1 · virtual", firmware="sim-1.0"))

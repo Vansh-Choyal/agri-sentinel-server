@@ -75,6 +75,9 @@ def ingest():
     if robot.zone_id != body["zone_id"]:
         db.session.rollback()
         return fail("zone_not_assigned", "Rover may report only to its currently assigned zone", 403)
+    if robot.source == "demo":
+        db.session.rollback()
+        return fail("demo_device", "Built-in demo rovers do not accept device telemetry", 403)
     zone = db.session.get(Zone, body["zone_id"])
     checkpoint = body["robot"].get("checkpoint_id")
     if checkpoint is not None and checkpoint not in {f"cp-{i:02d}" for i in range(1, zone.checkpoint_count + 1)}:
@@ -111,11 +114,12 @@ def ingest():
 @api.get("/overview")
 @operator_required
 def overview():
+    from .services.demo import profile
     robots = [robot_dict(r) for r in db.session.scalars(select(Robot).order_by(Robot.id).limit(200))]
     zones = [zone_dict(z) for z in db.session.scalars(select(Zone).order_by(Zone.map_row, Zone.map_col).limit(200))]
     latest = db.session.scalar(select(Telemetry).order_by(Telemetry.recorded_at.desc(), Telemetry.id.desc()).limit(1))
     alerts = list(db.session.scalars(select(Alert).where(Alert.status != "resolved").order_by(Alert.opened_at.desc()).limit(8)))
-    return jsonify(server_time=iso(utcnow()), fields=[{"id": f.id, "name": f.name, "area_ha": f.area_ha, "description": f.description} for f in db.session.scalars(select(Field))], counts={"total": len(robots), "online": sum(r["online"] for r in robots), "offline": sum(not r["online"] for r in robots), "idle": sum(r["online"] and r["state"] == "idle" for r in robots), "zones": len(zones), "active_alerts": db.session.scalar(select(db.func.count(Alert.id)).where(Alert.status != "resolved")), "telemetry": db.session.scalar(select(db.func.count(Telemetry.id)))}, robots=robots, zones=zones, latest=telemetry_dict(latest), latest_stale=latest is None or (utcnow() - latest.recorded_at).total_seconds() > current_app.config["STALE_TIMEOUT_SECONDS"], alerts=[alert_dict(a) for a in alerts], activity=[telemetry_dict(t) for t in db.session.scalars(select(Telemetry).order_by(Telemetry.received_at.desc(), Telemetry.id.desc()).limit(8))], timeouts={"offline": current_app.config["OFFLINE_TIMEOUT_SECONDS"], "stale": current_app.config["STALE_TIMEOUT_SECONDS"]})
+    return jsonify(demo=profile(), server_time=iso(utcnow()), fields=[{"id": f.id, "name": f.name, "area_ha": f.area_ha, "description": f.description} for f in db.session.scalars(select(Field))], counts={"total": len(robots), "online": sum(r["online"] for r in robots), "offline": sum(not r["online"] for r in robots), "idle": sum(r["online"] and r["state"] == "idle" for r in robots), "zones": len(zones), "active_alerts": db.session.scalar(select(db.func.count(Alert.id)).where(Alert.status != "resolved")), "telemetry": db.session.scalar(select(db.func.count(Telemetry.id)))}, robots=robots, zones=zones, latest=telemetry_dict(latest), latest_stale=latest is None or (utcnow() - latest.recorded_at).total_seconds() > current_app.config["STALE_TIMEOUT_SECONDS"], alerts=[alert_dict(a) for a in alerts], activity=[telemetry_dict(t) for t in db.session.scalars(select(Telemetry).order_by(Telemetry.received_at.desc(), Telemetry.id.desc()).limit(8))], timeouts={"offline": current_app.config["OFFLINE_TIMEOUT_SECONDS"], "stale": current_app.config["STALE_TIMEOUT_SECONDS"]})
 
 
 @api.get("/robots")
@@ -382,7 +386,12 @@ def export_report():
     def write(*cells):
         writer.writerow([csv_cell(cell) for cell in cells])
     write("AgriSentinel measurement report", report["period"], report["from"], report["to"])
+    write("Data sources", ", ".join(report["sources"]))
+    write("Farm scenario", report.get("demo", {}).get("scenario", "") if report.get("demo") else "")
     write("Basis", "Stored telemetry; missing values excluded; heading average is circular; activity counts are samples, not operating duration.")
+    write("Partition", "Crop", "Area ha")
+    for zone in report["zones"]:
+        write(zone["name"], zone["crop"], zone["area_ha"])
     write("Scope", "Metric", "Unit", "Samples", "Minimum", "Maximum", "Average")
     for scope, stats in [("Fleet", report["statistics"])] + [(zone["name"], zone["statistics"]) for zone in report["zones"]]:
         for metric, stat in stats.items():

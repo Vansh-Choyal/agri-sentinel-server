@@ -19,11 +19,12 @@ def robot_dict(robot):
 
 
 def zone_dict(zone):
+    from .demo import crop_context
     latest = db.session.scalar(select(Telemetry).where(Telemetry.zone_id == zone.id).order_by(Telemetry.recorded_at.desc(), Telemetry.id.desc()).limit(1))
     last = db.session.scalar(select(Inspection).where(Inspection.zone_id == zone.id).order_by(Inspection.inspected_at.desc()).limit(1))
     day = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     checkpoints = db.session.scalar(select(db.func.count(db.distinct(Inspection.checkpoint_id))).where(Inspection.zone_id == zone.id, Inspection.inspected_at >= day))
-    return {"id": zone.id, "field_id": zone.field_id, "name": zone.name, "crop": zone.crop, "area_ha": zone.area_ha, "map_col": zone.map_col, "map_row": zone.map_row, "checkpoint_count": zone.checkpoint_count, "inspected_checkpoints_today": checkpoints, "last_inspection": iso(last.inspected_at) if last else None, "robot_ids": list(db.session.scalars(select(Robot.id).where(Robot.zone_id == zone.id))), "active_alerts": db.session.scalar(select(db.func.count(Alert.id)).where(Alert.zone_id == zone.id, Alert.status != "resolved")), "stale": latest is None or (utcnow() - latest.recorded_at).total_seconds() > current_app.config["STALE_TIMEOUT_SECONDS"], "latest": telemetry_dict(latest)}
+    return {"id": zone.id, "field_id": zone.field_id, "name": zone.name, "crop": zone.crop, "cultivation": crop_context(zone), "area_ha": zone.area_ha, "map_col": zone.map_col, "map_row": zone.map_row, "checkpoint_count": zone.checkpoint_count, "inspected_checkpoints_today": checkpoints, "last_inspection": iso(last.inspected_at) if last else None, "robot_ids": list(db.session.scalars(select(Robot.id).where(Robot.zone_id == zone.id))), "active_alerts": db.session.scalar(select(db.func.count(Alert.id)).where(Alert.zone_id == zone.id, Alert.status != "resolved")), "stale": latest is None or (utcnow() - latest.recorded_at).total_seconds() > current_app.config["STALE_TIMEOUT_SECONDS"], "latest": telemetry_dict(latest)}
 
 
 def alert_dict(alert, history=False):

@@ -56,6 +56,7 @@ class Accumulator:
 
 
 def aggregate(args, report=False):
+    from .demo import profile
     start, end, period = period_bounds(args, report)
     zone_ids = args.get("zones", "")
     zones = zone_ids.split(",") if zone_ids else []
@@ -88,7 +89,8 @@ def aggregate(args, report=False):
             acc = buckets.get((zid, index))
             stats = acc.summary() if acc else {}
             points.append({"zone_id": zid, "at": iso(at), "count": acc.count if acc else 0, **{key: stats[key]["avg"] if acc else None for key in METRICS}})
-    result = {"from": iso(start), "to": iso(end), "period": period, "bucket_seconds": seconds, "record_count": total.count, "statistics": total.summary(), "points": points, "zones": [{"id": zid, "name": db.session.get(Zone, zid).name, "count": acc.count, "statistics": acc.summary()} for zid, acc in sorted(by_zone.items())], "robots": [{"id": rid, "name": db.session.get(Robot, rid).name, "records": acc.count, "state_samples": dict(acc.states), "sources": dict(acc.sources)} for rid, acc in sorted(by_robot.items())], "sources": dict(total.sources)}
+    result = {"from": iso(start), "to": iso(end), "period": period, "bucket_seconds": seconds, "record_count": total.count, "statistics": total.summary(), "points": points, "zones": [{"id": zid, "name": db.session.get(Zone, zid).name, "crop": db.session.get(Zone, zid).crop, "area_ha": db.session.get(Zone, zid).area_ha, "count": acc.count, "sources": dict(acc.sources), "statistics": acc.summary()} for zid, acc in sorted(by_zone.items())], "robots": [{"id": rid, "name": db.session.get(Robot, rid).name, "records": acc.count, "state_samples": dict(acc.states), "sources": dict(acc.sources)} for rid, acc in sorted(by_robot.items())], "sources": dict(total.sources)}
+    result["demo"] = profile() if total.sources.get("demo") else None
     if report:
         alert_query = select(Alert).where(Alert.opened_at < end, db.or_(Alert.resolved_at.is_(None), Alert.resolved_at >= start))
         inspection_query = select(Inspection).where(Inspection.inspected_at >= start, Inspection.inspected_at < end)

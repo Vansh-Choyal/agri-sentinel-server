@@ -139,6 +139,7 @@ try {
     snapshot.robots.length,
   );
   assert.ok(!d.querySelector("#overview-map").textContent.includes("NaN"));
+  assert.equal(d.querySelector("#demo-notice").hidden, !snapshot.demo);
   await wait(
     () => charts.some((c) => c.id === "overview-chart"),
     "overview chart dataset",
@@ -176,9 +177,9 @@ try {
         .textContent.includes("Device commands"),
     "rover details",
   );
-  assert.ok(
-    d.querySelector("#detail-content").textContent.includes("Not reported"),
-  );
+  assert.ok(d.querySelector("#detail-content").textContent.includes(
+    snapshot.robots[0].battery_pct === null ? "Not reported" : String(snapshot.robots[0].battery_pct)
+  ));
   assert.equal(d.querySelectorAll("[data-detail-sensor]").length, 9);
   click("#detail-dialog [data-close-dialog]");
   click("#heading-action");
@@ -201,6 +202,37 @@ try {
       button.textContent,
     );
     assert.equal(button.getAttribute("aria-pressed"), "true");
+    if (snapshot.demo) {
+      const chart = charts.findLast((c) => c.id === "analytics-chart" && !c.destroyed);
+      for (const series of chart.data.datasets) {
+        assert.ok(series.data.length > 1, "Demo curve needs multiple stored samples");
+        assert.ok(series.data.every((point) => point.y !== null), "Empty aggregation buckets must not fragment demo curves");
+        assert.ok(series.spanGaps > 0, "Demo curve uses a bounded gap between sampled points");
+      }
+    }
+  }
+  if (snapshot.demo) {
+    const originalFetch = w.fetch;
+    w.fetch = async (path, options) => {
+      const response = await originalFetch(path, options);
+      if (!path.startsWith("/api/v1/analytics?")) return response;
+      const data = await response.json();
+      data.sources = {hardware: data.record_count};
+      for (const zone of data.zones) zone.sources = {hardware: zone.count};
+      // This network double verifies that hardware gaps are preserved by the
+      // renderer; it never writes telemetry or changes the running database.
+      for (const metric of d.querySelectorAll("[data-metric]")) data.points[0][metric.dataset.metric] = null;
+      return new Response(JSON.stringify(data), {headers: {"Content-Type": "application/json"}});
+    };
+    d.querySelector("#analytics-period").dispatchEvent(new w.Event("change", {bubbles: true}));
+    await wait(() => charts.findLast((c) => c.id === "analytics-chart" && !c.destroyed)?.data.datasets[0]?.spanGaps === false,
+      "hardware gaps preserved");
+    const hardwareChart = charts.findLast((c) => c.id === "analytics-chart" && !c.destroyed);
+    assert.ok(hardwareChart.data.datasets.some((series) => series.data.some((point) => point.y === null)));
+    w.fetch = originalFetch;
+    d.querySelector("#analytics-period").dispatchEvent(new w.Event("change", {bubbles: true}));
+    await wait(() => charts.findLast((c) => c.id === "analytics-chart" && !c.destroyed)?.data.datasets[0]?.spanGaps > 0,
+      "demo curves restored");
   }
   for (const checkbox of d.querySelectorAll("#analytics-zones input"))
     checkbox.checked = false;
@@ -228,6 +260,13 @@ try {
   click("#settings-button");
   await wait(() => d.querySelectorAll(".rule-form").length === 7, "rules");
   click("#rules-dialog [data-close-dialog]");
+  const downloads = [];
+  const blobs = new Map();
+  let printed = 0;
+  w.URL.createObjectURL = (blob) => { const url = "blob:test-" + blobs.size; blobs.set(url, blob); return url; };
+  w.URL.revokeObjectURL = () => {};
+  w.HTMLAnchorElement.prototype.click = function () { downloads.push({name: this.download, blob: blobs.get(this.href)}); };
+  w.print = () => { printed++; };
   await navigate("reports");
   await wait(() => d.querySelector(".report-banner"), "report generation");
   assert.ok(
@@ -239,6 +278,28 @@ try {
   );
   assert.equal(exported.status, 200);
   assert.ok((await exported.text()).includes("Environmental trends"));
+  for (const period of ["daily", "weekly", "monthly"]) {
+    d.querySelector("#report-period").value = period;
+    d.querySelector("#report-zone").value = "zone-c";
+    d.querySelector("#report-end").value = new Date(Date.now() - 3600000).toISOString().slice(0,16);
+    d.querySelector("#report-form").dispatchEvent(new w.Event("submit", {bubbles:true, cancelable:true}));
+    await wait(() => d.querySelector("#csv-export").href.includes("period=" + period) &&
+      d.querySelector("#csv-export").href.includes("zones=zone-c") &&
+      d.querySelector("#report-content").getAttribute("aria-busy") === "false", "filtered " + period + " report");
+    const url = new URL(d.querySelector("#csv-export").href);
+    assert.ok(url.searchParams.get("from") && url.searchParams.get("to"), "CSV freezes displayed report bounds");
+    const csv = await (await http(url.pathname + url.search)).text();
+    assert.ok(csv.includes("Central Plot") === false);
+    assert.ok(csv.includes("East Plot"));
+  }
+  click("#csv-export");
+  await wait(() => downloads.length === 1, "CSV button download");
+  assert.ok((await downloads[0].blob.text()).includes("East Plot"));
+  click("#heading-action");
+  await wait(() => downloads.length === 2, "heading CSV download");
+  assert.ok(downloads[1].name.includes("monthly"));
+  click("#print-report");
+  await wait(() => printed === 1, "print / PDF action");
   assert.deepEqual(errors, []);
   assert.ok(d.querySelector("#error-banner").hidden);
   process.stdout.write(

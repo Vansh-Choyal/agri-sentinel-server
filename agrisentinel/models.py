@@ -70,7 +70,7 @@ class Robot(db.Model):
     name = db.Column(db.String(120), nullable=False)
     zone_id = db.Column(db.ForeignKey("zone.id"), index=True)
     api_key_hash = db.Column(db.String(64), nullable=False)
-    source = db.Column(db.String(16), nullable=False)  # hardware or simulator; server-owned
+    source = db.Column(db.String(16), nullable=False)  # hardware, simulator or built-in demo; server-owned
     model = db.Column(db.String(120), default="ESP32 rover")
     firmware = db.Column(db.String(80), default="unreported")
     registered_at = db.Column(UTCDateTime, nullable=False, default=utcnow)

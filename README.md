@@ -1,6 +1,6 @@
 # AgriSentinel
 
-A complete local agricultural rover monitoring platform: Flask, SQLAlchemy, persistent SQLite, Jinja, vanilla JavaScript, bundled Chart.js, authenticated REST APIs and SSE. A **separate Python simulator** acts as multiple ESP32 devices over HTTP. Monitoring requires no physical hardware, build step or runtime CDN. The optional chatbot and voice mode use DeepInfra.
+A complete local agricultural rover monitoring platform: Flask, SQLAlchemy, persistent SQLite, Jinja, vanilla JavaScript, bundled Chart.js, authenticated REST APIs and SSE. A **built-in demonstration feed** updates three virtual rovers every five seconds; no separate simulator is required. The optional legacy HTTP simulator remains available for protocol testing in device-only mode. Monitoring requires no physical hardware, build step or runtime CDN. The optional chatbot and voice mode use DeepInfra.
 
 The interface uses graphite surfaces (`#0a0a0a` / `#121212`), high-contrast neutral text, IBM Plex Sans and IBM Plex Mono, blue actions and selection, labeled status indicators, readable tables and reusable CSS tokens. There are seven working sections: overview, field monitoring, rover management, telemetry analytics, alerts, reports and a farm chatbot.
 
@@ -23,17 +23,15 @@ Terminal 1:
 
 Open **http://127.0.0.1:5000**. On first startup the backend generates a local operator password. Read `instance/admin-credentials.txt` and sign in as `operator`. If `ADMIN_PASSWORD` is set in `.env`, use that password instead. Explicit passwords must contain at least 12 characters.
 
-Terminal 2, in the same repository directory:
+The dashboard starts with a labeled fictional rabi-season farm: wheat in zones A, B and E, chickpea in C and D, and a fallow plot in F. Shared day/night weather, inverse temperature/humidity changes, gradual soil drying and staggered two-day irrigation scenarios keep the values coherent. Rovers patrol and stop at checkpoints during the day and idle/charge overnight. Values represent an illustrative scenario, not local weather or physical measurements.
 
-```powershell
-.\.venv\Scripts\python.exe -m simulator
-```
+On first activation, the app generates 30 days of half-hourly demo history. Charts connect stored demo samples with bounded curves; real device histories retain missing-data gaps. Fresh readings are then persisted every five seconds through the built-in service. Startup backfills gaps at half-hour intervals; repeated startup preserves existing history. The original provisioned virtual rovers are adopted as demo devices, and missing demo rovers are added up to three. Together with the registered ESP32 camera rover, the local fleet has four rovers. Each demo rover patrols two plots during the day and parks overnight. Surplus rovers from the earlier six-demo configuration are archived under `instance/backups/` before removal. Physical devices and their keys are preserved. The crop plan and sowing dates are stored in the database; growth stages are calendar-based assumptions.
 
-If you activate the virtual environment first, the equivalent commands are exactly **`python app.py`** and **`python -m simulator`**. On macOS/Linux use `.venv/bin/python` in place of `.venv\Scripts\python.exe`.
+The chatbot receives the same stored readings and crop plan, current alerts and commands, project capabilities/limitations, and a past-24-hour statistical summary. It can answer judges' questions about crops, conditions, thresholds and implemented features without presenting generated data as tested hardware results. DeepInfra credentials are still required for model answers.
 
-The backend provisions four virtual rovers and a demonstration farm with six named partitions. This is **configuration, not fabricated telemetry**: no measurements or historical statistics are seeded. The simulator starts sending automatically, every 10 seconds. Watch online counts, field readings, the event log and charts update. One virtual partition starts dry to make the low-moisture rule observable immediately; other anomalies occur during the run. All these observations are labeled **SIMULATED**.
+In Reports, Generate, both CSV actions and Print / PDF respect the selected period, zone and ending time. CSV uses the exact bounds of the generated on-screen report. Daily, weekly and monthly summaries include demo history immediately. Print / PDF opens the browser print dialog; choose Save as PDF there.
 
-Select a field partition, open a rover, issue an Inspect command, view its acknowledgement and checkpoint history, compare sensor measurements, and generate a daily report. Stop the simulator with Ctrl+C: values become stale after 30 seconds, rovers become offline after 45 seconds, and the presence monitor opens the corresponding alerts within its next 5-second cycle. Start it again to recover connectivity. Environmental alerts recover only on fresh, valid readings beyond their recovery threshold.
+To use physical devices only, set `DEMO_DATA=false` in `.env` and restart. Existing demo records remain labeled in history; they are not deleted. The optional `python -m simulator` is only for independent HTTP protocol testing with devices registered as `simulator`; adopted built-in demo rover IDs do not accept device telemetry.
 
 `instance/` contains the database, local secret, operator credentials and simulator provisioning keys. It is ignored by Git. Keep it private and back it up; do not publish it.
 
@@ -51,6 +49,7 @@ Browser (Jinja / CSS / vanilla JS / bundled Chart.js)
 Flask API -> strict validation -> ingestion transaction -> SQLAlchemy database
                                      |                 (SQLite / PostgreSQL)
                                      +-> rules + inspection events + change log
+Built-in demo feed (5 s) --------------> persisted demo readings
 Presence monitor (5 s) -----------------> stale/offline conditions + command expiry
   ^
   | public device REST API with independent per-rover keys
@@ -67,7 +66,7 @@ agrisentinel/seed.py          Idempotent schema-v1 bootstrap; no telemetry seeds
 agrisentinel/auth.py          Operator sessions, CSRF, device key verification
 agrisentinel/validation.py    Strict version-1 payload validation
 agrisentinel/api.py           Versioned REST routes and durable-change SSE
-agrisentinel/services/       Alerts, presence, serialization, streaming aggregation
+agrisentinel/services/       Built-in demo, alerts, presence, serialization, aggregation
 agrisentinel/templates/      Jinja login and dashboard shell
 agrisentinel/static/         Design system, frontend, fonts and chart library
 simulator/                   Standalone HTTP rover simulator
@@ -163,7 +162,7 @@ All dashboard data endpoints require an operator session. Mutations also require
 | --- | --- |
 | `GET /api/v1/health` | Minimal unauthenticated health check |
 | `GET /api/v1/overview` | Actual fleet counts, configured fields/zones, latest data, activity and alerts |
-| `GET, POST /api/v1/robots` | List / register rover; source is `hardware` or `simulator` |
+| `GET, POST /api/v1/robots` | List / register rover; registration source is `hardware` or `simulator`; built-in devices use server-owned `demo` |
 | `GET, PATCH /api/v1/robots/<id>` | Details / update `zone_id` (or null to unassign) |
 | `GET /api/v1/zones`, `/zones/<id>` | Partition metadata, readings, inspection coverage and assignments |
 | `GET /api/v1/telemetry` | Paginated raw history; `robot_id`, `zone_id` or comma-separated `zones`, `period`, `before_id`, `limit` |
@@ -207,7 +206,7 @@ These thresholds are demonstration/operational settings, **not validated agronom
 
 ## Simulator configuration
 
-The default file `instance/simulator.json` is generated once during initial farm provisioning. Each listed rover has its own key. The service reads that file and communicates exclusively through public REST endpoints. There is no direct database insertion or Flask import.
+This optional legacy tool is not needed for the built-in demo. Use a device-only database with simulator-source devices for these checks. The default file `instance/simulator.json` is generated once during initial farm provisioning. Each listed rover has its own key. The service reads that file and communicates exclusively through public REST endpoints. There is no direct database insertion or Flask import.
 
 ```powershell
 # Normal continuous mode
@@ -246,7 +245,7 @@ Each worker has independent random state, credentials, HTTP connection and retry
 
 Tests use isolated databases and cover authentication, strict types/ranges/timezones, source integrity, missing sensors, duplicate/conflicting events, concurrent retries, ownership, out-of-order history, alert deduplication/hysteresis/recovery, stale/offline evaluation, acknowledgements, rules, commands, report/CSV calculations, circular headings, pagination, SSE, restart persistence and simulator/API compatibility. They do not modify local provisioning keys.
 
-With the server running and the continuous simulator stopped:
+For legacy simulator protocol checks, use a separate device-only instance (`DEMO_DATA=false`) with simulator-source devices and the continuous simulator stopped:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/smoke_test.py --offline

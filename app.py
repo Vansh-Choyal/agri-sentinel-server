@@ -16,7 +16,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     host, port = os.getenv("HOST", "0.0.0.0"), int(os.getenv("PORT", "5000"))
     stop_monitor = start_monitor(app)
-    print(f"\n  AgriSentinel -> http://{host}:{port}\n  Operator credentials: {app.instance_path}/admin-credentials.txt\n  Simulator: python -m simulator\n", flush=True)
+    print(f"\n  AgriSentinel -> http://{host}:{port}\n  Operator credentials: {app.instance_path}/admin-credentials.txt\n  Built-in demo feed: enabled by default (DEMO_DATA=false for device-only operation)\n", flush=True)
     try:
         serve(app, host=host, port=port, threads=24, channel_timeout=120)
     finally:
